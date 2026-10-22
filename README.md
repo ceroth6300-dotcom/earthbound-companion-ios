@@ -271,3 +271,9 @@ MaternalBound Redux and its adaptations have separate GPLv3 terms. Those terms d
 Historical v0.4.0 and Redux setup evidence covers extraction, pack comparison, clean headered-ROM setup without installed Python/Git, soundtrack repair/verification, opening gameplay and save isolation on the releases named in those reports. Dev.32's unchanged native player/helpers retain their historical evidence; v4 checks cover four pack identities, each with 1,000 seeds and 62 combinations, plus focused native consumer/opening/encounter checks. Exact hashes and limits are in [validation/](validation/) and [dev.32 notes](docs/RELEASE-dev32.md). This documentation closeout did not rerun gameplay or replace the ZIP.
 
 Issues and contributions should never attach ROMs, extracted asset packs, saves containing embedded game data, or soundtrack files. Documentation captures are labeled with their tested development scope.
+
+## Community
+
+[**R.A.I.D. — Retro AI Development**](https://discord.gg/Ad9BwSzctP) · a Discord for AI-assisted retro reverse-engineering, decomp & recomp.
+
+I post all my projects and updates there. Join to discuss the games, share your work, or follow what I’m working on next.
