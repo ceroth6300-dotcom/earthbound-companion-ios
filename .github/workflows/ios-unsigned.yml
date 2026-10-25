@@ -1,0 +1,116 @@
+
+name: EarthBound Companion iOS Unsigned Build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-ios:
+    name: Compile iOS host
+    runs-on: macos-15
+    timeout-minutes: 60
+
+    env:
+      DOTNET_NOLOGO: "true"
+      DOTNET_CLI_TELEMETRY_OPTOUT: "true"
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up .NET SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+
+      - name: Show tool versions
+        run: |
+          set -euo pipefail
+          dotnet --info
+          xcodebuild -version
+
+      - name: Install iOS workload
+        run: |
+          set -euo pipefail
+          dotnet workload install ios
+
+      - name: Find iOS project
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          PROJECT=""
+
+          while IFS= read -r file; do
+            if grep -Eq 'net[0-9]+[.][0-9]+-ios' "$file"; then
+              PROJECT="$file"
+              break
+            fi
+          done < <(
+            find . -name "*.csproj" \
+              -not -path "*/obj/*" \
+              -not -path "*/bin/*" \
+              | sort
+          )
+
+          if [ -z "$PROJECT" ]; then
+            echo "::error::No .NET iOS project found"
+            exit 1
+          fi
+
+          echo "IOS_PROJECT=$PROJECT" >> "$GITHUB_ENV"
+          echo "Found: $PROJECT"
+
+      - name: Restore dependencies
+        run: |
+          set -euo pipefail
+          dotnet restore "$IOS_PROJECT" \
+            -p:RuntimeIdentifier=ios-arm64
+
+      - name: Compile iOS host
+        shell: bash
+        run: |
+          set -uo pipefail
+
+          mkdir -p diagnostics
+
+          dotnet build "$IOS_PROJECT" \
+            --configuration Release \
+            --no-restore \
+            -p:RuntimeIdentifier=ios-arm64 \
+            -p:EnableCodeSigning=false \
+            -p:CodesignRequireProvisioningProfile=false \
+            -p:BuildIpa=false \
+            -p:ArchiveOnBuild=false \
+            -v:normal \
+            -bl:diagnostics/build.binlog \
+            2>&1 | tee diagnostics/build.log
+
+          exit "${PIPESTATUS[0]}"
+
+      - name: Collect build information
+        if: always()
+        shell: bash
+        run: |
+          mkdir -p diagnostics
+          dotnet --info > diagnostics/dotnet-info.txt 2>&1
+          xcodebuild -version \
+            > diagnostics/xcode-version.txt 2>&1
+          find . -name "*.csproj" \
+            > diagnostics/projects.txt
+
+      - name: Upload build diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-build-diagnostics
+          path: diagnostics/
+          if-no-files-found: ignore
+          retention-days: 14
