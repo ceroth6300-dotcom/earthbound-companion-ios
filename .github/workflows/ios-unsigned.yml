@@ -15,7 +15,7 @@ permissions:
 
 jobs:
   build-ios:
-    name: Compile iOS host
+    name: Build and Validate iOS
     runs-on: xcode-27
     timeout-minutes: 60
 
@@ -39,7 +39,6 @@ jobs:
 
           if [ ! -d "$XCODE" ]; then
             echo "::error::Xcode 27.1 not found"
-            ls /Applications | grep Xcode || true
             exit 1
           fi
 
@@ -61,34 +60,12 @@ jobs:
           dotnet workload install ios
           dotnet workload list
 
-      - name: Verify environment
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          dotnet --version
-          xcodebuild -version
-
-          if [ ! -f "$IOS_PROJECT" ]; then
-            echo "::error::iOS project not found"
-            exit 1
-          fi
-
-          XCODE_VERSION="$(
-            xcodebuild -version |
-            awk '/^Xcode / {print $2}'
-          )"
-
-          if [[ "$XCODE_VERSION" != 27.1* ]]; then
-            echo "::error::Expected Xcode 27.1"
-            exit 1
-          fi
-
       - name: Prepare directories
         shell: bash
         run: |
           mkdir -p diagnostics
           mkdir -p artifacts
+          mkdir -p validation
 
       - name: Restore dependencies
         shell: bash
@@ -101,7 +78,7 @@ jobs:
             -p:EnableCodeSigning=false \
             -p:CodesignRequireProvisioningProfile=false
 
-      - name: Compile unsigned iOS application
+      - name: Compile unsigned iOS app
         shell: bash
         run: |
           set -uo pipefail
@@ -121,15 +98,12 @@ jobs:
 
           exit "${PIPESTATUS[0]}"
 
-      - name: Package unsigned iOS app
+      - name: Find and package iOS app
         shell: bash
         run: |
           set -euo pipefail
 
           OUTPUT="Ports/iOS/bin/$CONFIGURATION/net10.0-ios/$RUNTIME_IDENTIFIER"
-
-          echo "Searching for compiled .app bundle..."
-          find "$OUTPUT" -name "*.app" -type d -print
 
           APP_PATH="$(
             find "$OUTPUT" -name "*.app" -type d \
@@ -137,28 +111,164 @@ jobs:
           )"
 
           if [ -z "$APP_PATH" ]; then
-            echo "::error::No .app bundle was produced"
-            echo "Output contents:"
-            find "$OUTPUT" -maxdepth 4 -print \
-              | head -100
+            echo "::error::No .app bundle found"
+            find "$OUTPUT" -maxdepth 4 -print
             exit 1
           fi
 
-          echo "Found app: $APP_PATH"
-
-          APP_NAME="$(basename "$APP_PATH")"
+          echo "APP_PATH=$APP_PATH" >> "$GITHUB_ENV"
 
           ditto -c -k --sequesterRsrc \
             --keepParent "$APP_PATH" \
-            "artifacts/EarthBoundCompanion-iOS-Unsigned.zip"
+            artifacts/EarthBoundCompanion-iOS-Unsigned.zip
 
-          echo "Packaged app:"
-          ls -lh artifacts/
+      - name: Validate unsigned iOS bundle
+        shell: bash
+        run: |
+          set -euo pipefail
 
-          echo "App contents:"
-          ls -la "$APP_PATH"
+          REPORT="validation/ios-validation.txt"
+          PLIST="$APP_PATH/Info.plist"
 
-      - name: Upload unsigned iOS application
+          exec > >(tee "$REPORT") 2>&1
+
+          echo "EARTHBOUND COMPANION IOS VALIDATION"
+          echo "================================="
+          echo "Date: $(date -u)"
+          echo "App: $APP_PATH"
+          echo ""
+
+          FAIL=0
+
+          check() {
+            if "$@"; then
+              echo "PASS: $*"
+            else
+              echo "FAIL: $*"
+              FAIL=1
+            fi
+          }
+
+          echo "1. Bundle"
+          check test -d "$APP_PATH"
+          check test -f "$PLIST"
+          echo ""
+
+          echo "2. App metadata"
+
+          if [ -f "$PLIST" ]; then
+            plutil -lint "$PLIST" || FAIL=1
+
+            for KEY in \
+              CFBundleIdentifier \
+              CFBundleExecutable \
+              CFBundlePackageType \
+              CFBundleVersion
+            do
+              VALUE="$(
+                /usr/libexec/PlistBuddy \
+                  -c "Print :$KEY" "$PLIST" \
+                  2>/dev/null || true
+              )"
+
+              if [ -n "$VALUE" ]; then
+                echo "PASS: $KEY = $VALUE"
+              else
+                echo "FAIL: Missing $KEY"
+                FAIL=1
+              fi
+            done
+          fi
+
+          echo ""
+          echo "3. Executable"
+
+          EXECUTABLE="$(
+            /usr/libexec/PlistBuddy \
+              -c "Print :CFBundleExecutable" "$PLIST" \
+              2>/dev/null || true
+          )"
+
+          if [ -z "$EXECUTABLE" ]; then
+            echo "FAIL: Executable name missing"
+            FAIL=1
+          elif [ ! -f "$APP_PATH/$EXECUTABLE" ]; then
+            echo "FAIL: Executable file missing"
+            FAIL=1
+          else
+            echo "PASS: Executable exists"
+            file "$APP_PATH/$EXECUTABLE"
+
+            if lipo -archs "$APP_PATH/$EXECUTABLE" \
+              | grep -qw arm64; then
+              echo "PASS: ARM64 architecture"
+            else
+              echo "FAIL: ARM64 architecture missing"
+              FAIL=1
+            fi
+          fi
+
+          echo ""
+          echo "4. Resources"
+
+          RESOURCE_COUNT="$(
+            find "$APP_PATH" -type f | wc -l | tr -d ' '
+          )"
+
+          echo "Files: $RESOURCE_COUNT"
+
+          if [ "$RESOURCE_COUNT" -gt 1 ]; then
+            echo "PASS: Bundle contains files"
+          else
+            echo "FAIL: Bundle appears empty"
+            FAIL=1
+          fi
+
+          echo ""
+          echo "5. Bundle size"
+
+          du -sh "$APP_PATH"
+          du -sh \
+            artifacts/EarthBoundCompanion-iOS-Unsigned.zip
+
+          echo ""
+          echo "6. Signing status"
+
+          codesign -dv "$APP_PATH" 2>&1 || true
+
+          echo ""
+          echo "================================="
+
+          if [ "$FAIL" -eq 0 ]; then
+            echo "VALIDATION PASSED"
+          else
+            echo "VALIDATION FAILED"
+          fi
+
+          exit "$FAIL"
+
+      - name: Create GitHub summary
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo "## EarthBound Companion iOS"
+            echo ""
+            echo "### Bundle validation"
+            echo ""
+            echo '```text'
+
+            if [ -f validation/ios-validation.txt ]; then
+              cat validation/ios-validation.txt
+            else
+              echo "Validation report not generated."
+            fi
+
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload unsigned iOS app
+        if: success()
         uses: actions/upload-artifact@v4
         with:
           name: EarthBoundCompanion-iOS-Unsigned
@@ -166,22 +276,16 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-      - name: Extract build errors
+      - name: Upload validation report
         if: always()
-        shell: bash
-        run: |
-          mkdir -p diagnostics
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-validation-report
+          path: validation/
+          if-no-files-found: ignore
+          retention-days: 30
 
-          if [ -f diagnostics/build.log ]; then
-            grep -Ei \
-              'error |error:|failed|warning ' \
-              diagnostics/build.log \
-              > diagnostics/errors.txt || true
-
-            cat diagnostics/errors.txt
-          fi
-
-      - name: Save environment information
+      - name: Save diagnostics
         if: always()
         shell: bash
         run: |
@@ -193,8 +297,12 @@ jobs:
           xcodebuild -version \
             > diagnostics/xcode-version.txt 2>&1 || true
 
-          dotnet workload list \
-            > diagnostics/workloads.txt 2>&1 || true
+          if [ -f diagnostics/build.log ]; then
+            grep -Ei \
+              'error |error:|failed|warning ' \
+              diagnostics/build.log \
+              > diagnostics/errors.txt || true
+          fi
 
       - name: Upload diagnostics
         if: always()
