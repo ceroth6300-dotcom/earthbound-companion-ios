@@ -23,6 +23,8 @@ jobs:
       DOTNET_NOLOGO: "true"
       DOTNET_CLI_TELEMETRY_OPTOUT: "true"
       IOS_PROJECT: Ports/iOS/Companion.iOS.csproj
+      CONFIGURATION: Debug
+      RUNTIME_IDENTIFIER: ios-arm64
 
     steps:
       - name: Checkout repository
@@ -36,7 +38,7 @@ jobs:
           XCODE="/Applications/Xcode_27.1.app"
 
           if [ ! -d "$XCODE" ]; then
-            echo "::error::Xcode 27.1 not installed"
+            echo "::error::Xcode 27.1 not found"
             ls /Applications | grep Xcode || true
             exit 1
           fi
@@ -66,7 +68,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          dotnet --info
+          dotnet --version
           xcodebuild -version
 
           if [ ! -f "$IOS_PROJECT" ]; then
@@ -84,13 +86,19 @@ jobs:
             exit 1
           fi
 
+      - name: Prepare diagnostics
+        shell: bash
+        run: |
+          mkdir -p diagnostics
+
       - name: Restore dependencies
         shell: bash
         run: |
           set -euo pipefail
 
           dotnet restore "$IOS_PROJECT" \
-            -p:RuntimeIdentifier=ios-arm64 \
+            -p:Configuration="$CONFIGURATION" \
+            -p:RuntimeIdentifier="$RUNTIME_IDENTIFIER" \
             -p:EnableCodeSigning=false \
             -p:CodesignRequireProvisioningProfile=false
 
@@ -99,16 +107,14 @@ jobs:
         run: |
           set -uo pipefail
 
-          mkdir -p diagnostics
-
           dotnet build "$IOS_PROJECT" \
-            --configuration Release \
-            --no-restore \
-            -p:RuntimeIdentifier=ios-arm64 \
+            --configuration "$CONFIGURATION" \
+            -p:RuntimeIdentifier="$RUNTIME_IDENTIFIER" \
             -p:EnableCodeSigning=false \
             -p:CodesignRequireProvisioningProfile=false \
             -p:BuildIpa=false \
             -p:ArchiveOnBuild=false \
+            -p:TrimMode=copy \
             -v:minimal \
             -bl:diagnostics/build.binlog \
             2>&1 | tee diagnostics/build.log
@@ -141,6 +147,9 @@ jobs:
 
           xcodebuild -version \
             > diagnostics/xcode-version.txt 2>&1 || true
+
+          dotnet workload list \
+            > diagnostics/workloads.txt 2>&1 || true
 
       - name: Upload diagnostics
         if: always()
