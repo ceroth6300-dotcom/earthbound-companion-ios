@@ -1,314 +1,44 @@
 
-name: EarthBound Companion iOS Unsigned Build
-
-on:
-  push:
-    branches:
-      - main
-  pull_request:
-    branches:
-      - main
-  workflow_dispatch:
-
-permissions:
-  contents: read
-
-jobs:
-  build-ios:
-    name: Build and Validate iOS
-    runs-on: xcode-27
-    timeout-minutes: 60
-
-    env:
-      DOTNET_NOLOGO: "true"
-      DOTNET_CLI_TELEMETRY_OPTOUT: "true"
-      IOS_PROJECT: Ports/iOS/Companion.iOS.csproj
-      CONFIGURATION: Debug
-      RUNTIME_IDENTIFIER: ios-arm64
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Select Xcode 27.1
+      - name: Create unsigned IPA
         shell: bash
         run: |
           set -euo pipefail
 
-          XCODE="/Applications/Xcode_27.1.app"
+          mkdir -p artifacts/ipa-staging/Payload
 
-          if [ ! -d "$XCODE" ]; then
-            echo "::error::Xcode 27.1 not found"
+          if [ -z "${APP_PATH:-}" ]; then
+            echo "::error::APP_PATH is missing"
             exit 1
           fi
 
-          echo "DEVELOPER_DIR=$XCODE/Contents/Developer" \
-            >> "$GITHUB_ENV"
-
-          export DEVELOPER_DIR="$XCODE/Contents/Developer"
-          xcodebuild -version
-
-      - name: Set up .NET 10
-        uses: actions/setup-dotnet@v4
-        with:
-          dotnet-version: "10.0.x"
-
-      - name: Install iOS workload
-        shell: bash
-        run: |
-          set -euo pipefail
-          dotnet workload install ios
-          dotnet workload list
-
-      - name: Prepare directories
-        shell: bash
-        run: |
-          mkdir -p diagnostics
-          mkdir -p artifacts
-          mkdir -p validation
-
-      - name: Restore dependencies
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          dotnet restore "$IOS_PROJECT" \
-            -p:Configuration="$CONFIGURATION" \
-            -p:RuntimeIdentifier="$RUNTIME_IDENTIFIER" \
-            -p:EnableCodeSigning=false \
-            -p:CodesignRequireProvisioningProfile=false
-
-      - name: Compile unsigned iOS app
-        shell: bash
-        run: |
-          set -uo pipefail
-
-          dotnet build "$IOS_PROJECT" \
-            --configuration "$CONFIGURATION" \
-            --no-restore \
-            -p:RuntimeIdentifier="$RUNTIME_IDENTIFIER" \
-            -p:EnableCodeSigning=false \
-            -p:CodesignRequireProvisioningProfile=false \
-            -p:BuildIpa=false \
-            -p:ArchiveOnBuild=false \
-            -p:TrimMode=copy \
-            -v:minimal \
-            -bl:diagnostics/build.binlog \
-            2>&1 | tee diagnostics/build.log
-
-          exit "${PIPESTATUS[0]}"
-
-      - name: Find and package iOS app
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          OUTPUT="Ports/iOS/bin/$CONFIGURATION/net10.0-ios/$RUNTIME_IDENTIFIER"
-
-          APP_PATH="$(
-            find "$OUTPUT" -name "*.app" -type d \
-              -print -quit
-          )"
-
-          if [ -z "$APP_PATH" ]; then
-            echo "::error::No .app bundle found"
-            find "$OUTPUT" -maxdepth 4 -print
+          if [ ! -d "$APP_PATH" ]; then
+            echo "::error::App bundle not found"
             exit 1
           fi
 
-          echo "APP_PATH=$APP_PATH" >> "$GITHUB_ENV"
+          # Copy the compiled app into Payload
+          ditto "$APP_PATH" \
+            "artifacts/ipa-staging/Payload/$(basename "$APP_PATH")"
+
+          # Create the IPA archive
+          cd artifacts/ipa-staging
 
           ditto -c -k --sequesterRsrc \
-            --keepParent "$APP_PATH" \
-            artifacts/EarthBoundCompanion-iOS-Unsigned.zip
+            --keepParent Payload \
+            ../EarthBoundCompanion-Unsigned.ipa
 
-      - name: Validate unsigned iOS bundle
-        shell: bash
-        run: |
-          set -euo pipefail
+          # Verify the archive
+          unzip -t ../EarthBoundCompanion-Unsigned.ipa
+          unzip -Z -1 ../EarthBoundCompanion-Unsigned.ipa \
+            | grep -q '^Payload/.*\.app/Info.plist$'
 
-          REPORT="validation/ios-validation.txt"
-          PLIST="$APP_PATH/Info.plist"
+          echo "Unsigned IPA created successfully"
 
-          exec > >(tee "$REPORT") 2>&1
-
-          echo "EARTHBOUND COMPANION IOS VALIDATION"
-          echo "================================="
-          echo "Date: $(date -u)"
-          echo "App: $APP_PATH"
-          echo ""
-
-          FAIL=0
-
-          check() {
-            if "$@"; then
-              echo "PASS: $*"
-            else
-              echo "FAIL: $*"
-              FAIL=1
-            fi
-          }
-
-          echo "1. Bundle"
-          check test -d "$APP_PATH"
-          check test -f "$PLIST"
-          echo ""
-
-          echo "2. App metadata"
-
-          if [ -f "$PLIST" ]; then
-            plutil -lint "$PLIST" || FAIL=1
-
-            for KEY in \
-              CFBundleIdentifier \
-              CFBundleExecutable \
-              CFBundlePackageType \
-              CFBundleVersion
-            do
-              VALUE="$(
-                /usr/libexec/PlistBuddy \
-                  -c "Print :$KEY" "$PLIST" \
-                  2>/dev/null || true
-              )"
-
-              if [ -n "$VALUE" ]; then
-                echo "PASS: $KEY = $VALUE"
-              else
-                echo "FAIL: Missing $KEY"
-                FAIL=1
-              fi
-            done
-          fi
-
-          echo ""
-          echo "3. Executable"
-
-          EXECUTABLE="$(
-            /usr/libexec/PlistBuddy \
-              -c "Print :CFBundleExecutable" "$PLIST" \
-              2>/dev/null || true
-          )"
-
-          if [ -z "$EXECUTABLE" ]; then
-            echo "FAIL: Executable name missing"
-            FAIL=1
-          elif [ ! -f "$APP_PATH/$EXECUTABLE" ]; then
-            echo "FAIL: Executable file missing"
-            FAIL=1
-          else
-            echo "PASS: Executable exists"
-            file "$APP_PATH/$EXECUTABLE"
-
-            if lipo -archs "$APP_PATH/$EXECUTABLE" \
-              | grep -qw arm64; then
-              echo "PASS: ARM64 architecture"
-            else
-              echo "FAIL: ARM64 architecture missing"
-              FAIL=1
-            fi
-          fi
-
-          echo ""
-          echo "4. Resources"
-
-          RESOURCE_COUNT="$(
-            find "$APP_PATH" -type f | wc -l | tr -d ' '
-          )"
-
-          echo "Files: $RESOURCE_COUNT"
-
-          if [ "$RESOURCE_COUNT" -gt 1 ]; then
-            echo "PASS: Bundle contains files"
-          else
-            echo "FAIL: Bundle appears empty"
-            FAIL=1
-          fi
-
-          echo ""
-          echo "5. Bundle size"
-
-          du -sh "$APP_PATH"
-          du -sh \
-            artifacts/EarthBoundCompanion-iOS-Unsigned.zip
-
-          echo ""
-          echo "6. Signing status"
-
-          codesign -dv "$APP_PATH" 2>&1 || true
-
-          echo ""
-          echo "================================="
-
-          if [ "$FAIL" -eq 0 ]; then
-            echo "VALIDATION PASSED"
-          else
-            echo "VALIDATION FAILED"
-          fi
-
-          exit "$FAIL"
-
-      - name: Create GitHub summary
-        if: always()
-        shell: bash
-        run: |
-          {
-            echo "## EarthBound Companion iOS"
-            echo ""
-            echo "### Bundle validation"
-            echo ""
-            echo '```text'
-
-            if [ -f validation/ios-validation.txt ]; then
-              cat validation/ios-validation.txt
-            else
-              echo "Validation report not generated."
-            fi
-
-            echo '```'
-          } >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Upload unsigned iOS app
-        if: success()
+      - name: Upload unsigned IPA
         uses: actions/upload-artifact@v4
         with:
-          name: EarthBoundCompanion-iOS-Unsigned
-          path: artifacts/EarthBoundCompanion-iOS-Unsigned.zip
+          name: EarthBoundCompanion-Unsigned-IPA
+          path: artifacts/EarthBoundCompanion-Unsigned.ipa
           if-no-files-found: error
           retention-days: 30
-
-      - name: Upload validation report
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: ios-validation-report
-          path: validation/
-          if-no-files-found: ignore
-          retention-days: 30
-
-      - name: Save diagnostics
-        if: always()
-        shell: bash
-        run: |
-          mkdir -p diagnostics
-
-          dotnet --info \
-            > diagnostics/dotnet-info.txt 2>&1 || true
-
-          xcodebuild -version \
-            > diagnostics/xcode-version.txt 2>&1 || true
-
-          if [ -f diagnostics/build.log ]; then
-            grep -Ei \
-              'error |error:|failed|warning ' \
-              diagnostics/build.log \
-              > diagnostics/errors.txt || true
-          fi
-
-      - name: Upload diagnostics
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: ios-build-diagnostics
-          path: diagnostics/
-          if-no-files-found: ignore
-          retention-days: 14
+          compression-level: 0
