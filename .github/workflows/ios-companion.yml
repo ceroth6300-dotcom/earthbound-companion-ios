@@ -16,31 +16,77 @@ jobs:
       - name: Checkout source
         uses: actions/checkout@v4
 
+      - name: Select Xcode 26
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "Available Xcode installations:"
+          ls -d /Applications/Xcode*.app || true
+
+          if [ -d /Applications/Xcode_26.6.app ]; then
+            sudo xcode-select -s \
+              /Applications/Xcode_26.6.app/Contents/Developer
+          fi
+
+          xcodebuild -version
+
       - name: Setup .NET 10
         uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '10.0.x'
 
-      - name: Install iOS workload
-        run: dotnet workload install ios
+      - name: Install compatible iOS workload
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          dotnet workload config --update-mode manifests
+
+          dotnet workload install ios \
+            --version 10.0.100
+
+          dotnet workload list
 
       - name: Check iOS project files
+        shell: bash
         run: |
+          set -euo pipefail
+
           test -f Ports/iOS/AppDelegate.cs
           test -f Ports/iOS/Program.cs
           test -f Ports/iOS/Companion.iOS.csproj
+
           xcodebuild -version
+          dotnet --info
 
       - name: Restore iOS project
+        shell: bash
         run: |
-          dotnet restore Ports/iOS/Companion.iOS.csproj \
+          set -euo pipefail
+
+          dotnet restore \
+            Ports/iOS/Companion.iOS.csproj \
             -p:RuntimeIdentifier=ios-arm64
 
       - name: Compile iOS host
+        shell: bash
         run: |
-          dotnet build Ports/iOS/Companion.iOS.csproj \
+          set -euo pipefail
+
+          dotnet build \
+            Ports/iOS/Companion.iOS.csproj \
             -c Release \
             -f net10.0-ios \
             -r ios-arm64 \
             --no-restore \
             -p:CodesignKey=-
+
+      - name: Upload build diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-build-diagnostics
+          path: |
+            Ports/iOS/obj/project.assets.json
+          if-no-files-found: ignore
