@@ -47,7 +47,6 @@ jobs:
             >> "$GITHUB_ENV"
 
           export DEVELOPER_DIR="$XCODE/Contents/Developer"
-
           xcodebuild -version
 
       - name: Set up .NET 10
@@ -59,7 +58,6 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-
           dotnet workload install ios
           dotnet workload list
 
@@ -86,10 +84,11 @@ jobs:
             exit 1
           fi
 
-      - name: Prepare diagnostics
+      - name: Prepare directories
         shell: bash
         run: |
           mkdir -p diagnostics
+          mkdir -p artifacts
 
       - name: Restore dependencies
         shell: bash
@@ -102,13 +101,14 @@ jobs:
             -p:EnableCodeSigning=false \
             -p:CodesignRequireProvisioningProfile=false
 
-      - name: Compile iOS host
+      - name: Compile unsigned iOS application
         shell: bash
         run: |
           set -uo pipefail
 
           dotnet build "$IOS_PROJECT" \
             --configuration "$CONFIGURATION" \
+            --no-restore \
             -p:RuntimeIdentifier="$RUNTIME_IDENTIFIER" \
             -p:EnableCodeSigning=false \
             -p:CodesignRequireProvisioningProfile=false \
@@ -120,6 +120,51 @@ jobs:
             2>&1 | tee diagnostics/build.log
 
           exit "${PIPESTATUS[0]}"
+
+      - name: Package unsigned iOS app
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          OUTPUT="Ports/iOS/bin/$CONFIGURATION/net10.0-ios/$RUNTIME_IDENTIFIER"
+
+          echo "Searching for compiled .app bundle..."
+          find "$OUTPUT" -name "*.app" -type d -print
+
+          APP_PATH="$(
+            find "$OUTPUT" -name "*.app" -type d \
+              -print -quit
+          )"
+
+          if [ -z "$APP_PATH" ]; then
+            echo "::error::No .app bundle was produced"
+            echo "Output contents:"
+            find "$OUTPUT" -maxdepth 4 -print \
+              | head -100
+            exit 1
+          fi
+
+          echo "Found app: $APP_PATH"
+
+          APP_NAME="$(basename "$APP_PATH")"
+
+          ditto -c -k --sequesterRsrc \
+            --keepParent "$APP_PATH" \
+            "artifacts/EarthBoundCompanion-iOS-Unsigned.zip"
+
+          echo "Packaged app:"
+          ls -lh artifacts/
+
+          echo "App contents:"
+          ls -la "$APP_PATH"
+
+      - name: Upload unsigned iOS application
+        uses: actions/upload-artifact@v4
+        with:
+          name: EarthBoundCompanion-iOS-Unsigned
+          path: artifacts/EarthBoundCompanion-iOS-Unsigned.zip
+          if-no-files-found: error
+          retention-days: 30
 
       - name: Extract build errors
         if: always()
