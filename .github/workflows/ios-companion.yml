@@ -16,7 +16,7 @@ jobs:
       - name: Checkout source
         uses: actions/checkout@v4
 
-      - name: Select Xcode 26
+      - name: Select compatible Xcode
         shell: bash
         run: |
           set -euo pipefail
@@ -24,9 +24,13 @@ jobs:
           echo "Available Xcode installations:"
           ls -d /Applications/Xcode*.app || true
 
-          if [ -d /Applications/Xcode_26.6.app ]; then
+          if [ -d /Applications/Xcode_26.0.app ]; then
             sudo xcode-select -s \
-              /Applications/Xcode_26.6.app/Contents/Developer
+              /Applications/Xcode_26.0.app/Contents/Developer
+          else
+            echo "ERROR: Xcode 26.0 is not installed."
+            echo "A compatible runner or workload is required."
+            exit 1
           fi
 
           xcodebuild -version
