@@ -3,9 +3,11 @@ name: EarthBound Companion iOS Unsigned Build
 
 on:
   push:
-    branches: [main]
+    branches:
+      - main
   pull_request:
-    branches: [main]
+    branches:
+      - main
   workflow_dispatch:
 
 permissions:
@@ -14,65 +16,83 @@ permissions:
 jobs:
   build-ios:
     name: Compile iOS host
-    runs-on: macos-15
+    runs-on: xcode-27
     timeout-minutes: 60
 
     env:
       DOTNET_NOLOGO: "true"
       DOTNET_CLI_TELEMETRY_OPTOUT: "true"
+      IOS_PROJECT: Ports/iOS/Companion.iOS.csproj
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Set up .NET SDK
-        uses: actions/setup-dotnet@v4
-        with:
-          dotnet-version: "10.0.x"
-
-      - name: Show tool versions
-        run: |
-          set -euo pipefail
-          dotnet --info
-          xcodebuild -version
-
-      - name: Install iOS workload
-        run: |
-          set -euo pipefail
-          dotnet workload install ios
-
-      - name: Find iOS project
+      - name: Select Xcode 27.1
         shell: bash
         run: |
           set -euo pipefail
 
-          PROJECT=""
+          XCODE="/Applications/Xcode_27.1.app"
 
-          while IFS= read -r file; do
-            if grep -Eq 'net[0-9]+[.][0-9]+-ios' "$file"; then
-              PROJECT="$file"
-              break
-            fi
-          done < <(
-            find . -name "*.csproj" \
-              -not -path "*/obj/*" \
-              -not -path "*/bin/*" \
-              | sort
-          )
-
-          if [ -z "$PROJECT" ]; then
-            echo "::error::No .NET iOS project found"
+          if [ ! -d "$XCODE" ]; then
+            echo "::error::Xcode 27.1 not installed"
+            ls /Applications | grep Xcode || true
             exit 1
           fi
 
-          echo "IOS_PROJECT=$PROJECT" >> "$GITHUB_ENV"
-          echo "Found: $PROJECT"
+          echo "DEVELOPER_DIR=$XCODE/Contents/Developer" \
+            >> "$GITHUB_ENV"
 
-      - name: Restore dependencies
+          export DEVELOPER_DIR="$XCODE/Contents/Developer"
+
+          xcodebuild -version
+
+      - name: Set up .NET 10
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+
+      - name: Install iOS workload
+        shell: bash
         run: |
           set -euo pipefail
+
+          dotnet workload install ios
+          dotnet workload list
+
+      - name: Verify environment
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          dotnet --info
+          xcodebuild -version
+
+          if [ ! -f "$IOS_PROJECT" ]; then
+            echo "::error::iOS project not found"
+            exit 1
+          fi
+
+          XCODE_VERSION="$(
+            xcodebuild -version |
+            awk '/^Xcode / {print $2}'
+          )"
+
+          if [[ "$XCODE_VERSION" != 27.1* ]]; then
+            echo "::error::Expected Xcode 27.1"
+            exit 1
+          fi
+
+      - name: Restore dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+
           dotnet restore "$IOS_PROJECT" \
-            -p:RuntimeIdentifier=ios-arm64
+            -p:RuntimeIdentifier=ios-arm64 \
+            -p:EnableCodeSigning=false \
+            -p:CodesignRequireProvisioningProfile=false
 
       - name: Compile iOS host
         shell: bash
@@ -89,24 +109,40 @@ jobs:
             -p:CodesignRequireProvisioningProfile=false \
             -p:BuildIpa=false \
             -p:ArchiveOnBuild=false \
-            -v:normal \
+            -v:minimal \
             -bl:diagnostics/build.binlog \
             2>&1 | tee diagnostics/build.log
 
           exit "${PIPESTATUS[0]}"
 
-      - name: Collect build information
+      - name: Extract build errors
         if: always()
         shell: bash
         run: |
           mkdir -p diagnostics
-          dotnet --info > diagnostics/dotnet-info.txt 2>&1
-          xcodebuild -version \
-            > diagnostics/xcode-version.txt 2>&1
-          find . -name "*.csproj" \
-            > diagnostics/projects.txt
 
-      - name: Upload build diagnostics
+          if [ -f diagnostics/build.log ]; then
+            grep -Ei \
+              'error |error:|failed|warning ' \
+              diagnostics/build.log \
+              > diagnostics/errors.txt || true
+
+            cat diagnostics/errors.txt
+          fi
+
+      - name: Save environment information
+        if: always()
+        shell: bash
+        run: |
+          mkdir -p diagnostics
+
+          dotnet --info \
+            > diagnostics/dotnet-info.txt 2>&1 || true
+
+          xcodebuild -version \
+            > diagnostics/xcode-version.txt 2>&1 || true
+
+      - name: Upload diagnostics
         if: always()
         uses: actions/upload-artifact@v4
         with:
