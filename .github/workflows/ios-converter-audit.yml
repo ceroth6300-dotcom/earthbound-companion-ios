@@ -3,6 +3,11 @@ name: iOS ROM Converter Source Audit
 
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - ios-rom-engine
+    paths:
+      - ".github/workflows/ios-converter-audit.yml"
 
 permissions:
   contents: read
@@ -17,7 +22,7 @@ jobs:
       - name: Checkout Companion
         uses: actions/checkout@v4
 
-      - name: Install Python
+      - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -38,7 +43,6 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-
           mkdir -p reports
 
           python3 - <<'PY'
@@ -64,11 +68,18 @@ jobs:
               "asset_load",
               "embed-registry",
               "pack-all",
+              "extract",
+              "rom",
           ]
 
           report = Path("reports/converter-audit.txt")
+          files_checked = 0
+          matches_found = 0
 
-          with report.open("w") as output:
+          with report.open(
+              "w", encoding="utf-8"
+          ) as output:
+
               output.write(
                   "EARTHBOUND CONVERTER SOURCE AUDIT\n"
               )
@@ -76,23 +87,30 @@ jobs:
 
               for root in roots:
                   if not root.exists():
+                      output.write(
+                          f"Missing directory: {root}\n"
+                      )
                       continue
 
-                  for path in root.rglob("*"):
+                  for path in sorted(root.rglob("*")):
                       if not path.is_file():
                           continue
+
                       if path.suffix.lower() not in extensions:
-                          continue
-                      if path.stat().st_size > 2_000_000:
                           continue
 
                       try:
+                          if path.stat().st_size > 2_000_000:
+                              continue
+
                           content = path.read_text(
                               encoding="utf-8",
                               errors="replace"
                           )
                       except OSError:
                           continue
+
+                      files_checked += 1
 
                       matches = [
                           (number, line.strip())
@@ -106,19 +124,42 @@ jobs:
                       ]
 
                       if matches:
-                          output.write(f"\nFILE: {path}\n")
+                          matches_found += len(matches)
+
+                          output.write(
+                              f"\nFILE: {path}\n"
+                          )
+
                           for number, line in matches[:60]:
                               output.write(
                                   f"  {number}: {line[:250]}\n"
                               )
 
-          print(report.read_text()[:12000])
+              output.write("\n")
+              output.write("=" * 40 + "\n")
+              output.write(
+                  f"Files checked: {files_checked}\n"
+              )
+              output.write(
+                  f"Matches found: {matches_found}\n"
+              )
+
+          print(report.read_text(
+              encoding="utf-8"
+          )[:15000])
+
+          print(
+              f"\nAudit complete: "
+              f"{files_checked} files, "
+              f"{matches_found} matches"
+          )
           PY
 
-      - name: Upload source audit
+      - name: Upload converter audit report
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: ios-converter-source-audit
           path: reports/converter-audit.txt
-          if-no-files-found: error
+          if-no-files-found: warn
           retention-days: 14
