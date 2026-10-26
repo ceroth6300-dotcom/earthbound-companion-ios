@@ -1,0 +1,124 @@
+
+name: iOS ROM Converter Source Audit
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    name: Inspect Native Converter
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout Companion
+        uses: actions/checkout@v4
+
+      - name: Install Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Fetch pinned native source
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          git clone \
+            https://github.com/seanstaggsQU/earthboundRecompLinux2026.git \
+            native-source
+
+          git -C native-source checkout \
+            76eacab54b05766b82c98da9c55d94d1236ece03
+
+      - name: Analyze converter files
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p reports
+
+          python3 - <<'PY'
+          from pathlib import Path
+
+          roots = [
+              Path("native-source"),
+              Path("scripts"),
+              Path("Companion"),
+              Path("patches"),
+          ]
+
+          extensions = {
+              ".c", ".h", ".cpp", ".hpp",
+              ".py", ".cs", ".patch",
+              ".txt", ".cmake",
+          }
+
+          terms = [
+              "assets.pak",
+              "ebtools-setup",
+              "pack_assets",
+              "asset_load",
+              "embed-registry",
+              "pack-all",
+          ]
+
+          report = Path("reports/converter-audit.txt")
+
+          with report.open("w") as output:
+              output.write(
+                  "EARTHBOUND CONVERTER SOURCE AUDIT\n"
+              )
+              output.write("=" * 40 + "\n\n")
+
+              for root in roots:
+                  if not root.exists():
+                      continue
+
+                  for path in root.rglob("*"):
+                      if not path.is_file():
+                          continue
+                      if path.suffix.lower() not in extensions:
+                          continue
+                      if path.stat().st_size > 2_000_000:
+                          continue
+
+                      try:
+                          content = path.read_text(
+                              encoding="utf-8",
+                              errors="replace"
+                          )
+                      except OSError:
+                          continue
+
+                      matches = [
+                          (number, line.strip())
+                          for number, line in enumerate(
+                              content.splitlines(), 1
+                          )
+                          if any(
+                              term.lower() in line.lower()
+                              for term in terms
+                          )
+                      ]
+
+                      if matches:
+                          output.write(f"\nFILE: {path}\n")
+                          for number, line in matches[:60]:
+                              output.write(
+                                  f"  {number}: {line[:250]}\n"
+                              )
+
+          print(report.read_text()[:12000])
+          PY
+
+      - name: Upload source audit
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-converter-source-audit
+          path: reports/converter-audit.txt
+          if-no-files-found: error
+          retention-days: 14
