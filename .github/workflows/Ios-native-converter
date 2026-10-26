@@ -1,0 +1,230 @@
+
+name: iOS Native ROM Converter Build
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - ios-rom-engine
+    paths:
+      - ".github/workflows/ios-native-converter.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  native-converter:
+    name: Build ARM64 Converter
+    runs-on: macos-15
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout Companion
+        uses: actions/checkout@v4
+
+      - name: Fetch native source
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          git clone \
+            https://github.com/seanstaggsQU/earthboundRecompLinux2026.git \
+            native-source
+
+          git -C native-source checkout \
+            76eacab54b05766b82c98da9c55d94d1236ece03
+
+      - name: Prepare build environment
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p output/objects
+          mkdir -p reports
+
+          SDK="$(xcrun --sdk iphoneos --show-sdk-path)"
+
+          echo "SDKROOT=$SDK" >> "$GITHUB_ENV"
+
+          echo "Xcode:"
+          xcodebuild -version
+
+          echo "iPhone SDK:"
+          echo "$SDK"
+
+      - name: Compile native converter objects
+        shell: bash
+        run: |
+          set -uo pipefail
+
+          python3 - <<'PY'
+          from pathlib import Path
+          import subprocess
+          import os
+          import sys
+
+          root = Path("native-source")
+          out = Path("output/objects")
+          out.mkdir(parents=True, exist_ok=True)
+
+          sources = [
+              "src/data/rom_extract.c",
+              "src/data/runtime_generated/rom_extract_table.c",
+              "src/data/text_compile.c",
+              "src/data/dont_care_compile.c",
+              "src/core/decomp.c",
+          ]
+
+          include_dirs = sorted({
+              str(root),
+              *(
+                  str(p)
+                  for p in root.rglob("*")
+                  if p.is_dir()
+                  and ".git" not in p.parts
+                  and "build" not in p.parts
+              ),
+          })
+
+          sdk = os.environ["SDKROOT"]
+
+          flags = [
+              "-target", "arm64-apple-ios15.0",
+              "-isysroot", sdk,
+              "-std=c11",
+              "-O2",
+              "-DEB_RUNTIME_ASSETS",
+              "-Wno-unused-function",
+          ]
+
+          for directory in include_dirs:
+              flags.extend(["-I", directory])
+
+          report = []
+          succeeded = []
+          failed = []
+
+          for relative in sources:
+              source = root / relative
+
+              if not source.exists():
+                  report.append(
+                      f"MISSING SOURCE: {relative}"
+                  )
+                  failed.append(relative)
+                  continue
+
+              object_file = out / (
+                  relative.replace("/", "_") + ".o"
+              )
+
+              command = [
+                  "xcrun", "--sdk", "iphoneos",
+                  "clang",
+                  *flags,
+                  "-c", str(source),
+                  "-o", str(object_file),
+              ]
+
+              result = subprocess.run(
+                  command,
+                  text=True,
+                  stdout=subprocess.PIPE,
+                  stderr=subprocess.STDOUT,
+              )
+
+              report.append(
+                  f"\nSOURCE: {relative}\n"
+                  f"EXIT CODE: {result.returncode}\n"
+                  f"{result.stdout}\n"
+              )
+
+              if result.returncode == 0:
+                  succeeded.append(str(object_file))
+              else:
+                  failed.append(relative)
+
+          report.append(
+              f"\nCompiled objects: {len(succeeded)}"
+          )
+          report.append(
+              f"Failed sources: {len(failed)}"
+          )
+
+          Path("reports/compile-report.txt").write_text(
+              "\n".join(report),
+              encoding="utf-8"
+          )
+
+          print("\n".join(report)[-20000:])
+
+          if failed:
+              sys.exit(1)
+          PY
+
+      - name: Create ARM64 static library
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          xcrun --sdk iphoneos ar rcs \
+            output/libEarthBoundRomConverter.a \
+            output/objects/*.o
+
+          xcrun --sdk iphoneos ranlib \
+            output/libEarthBoundRomConverter.a
+
+          file output/libEarthBoundRomConverter.a
+
+      - name: Inspect native library symbols
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          LIB="output/libEarthBoundRomConverter.a"
+
+          {
+            echo "EARTHBOUND NATIVE CONVERTER"
+            echo "=========================="
+            echo ""
+
+            echo "Architecture:"
+            lipo -info "$LIB"
+
+            echo ""
+            echo "Converter symbols:"
+            xcrun nm -g "$LIB" | \
+              grep -E 'rom_extract_' || true
+
+            echo ""
+            echo "Unresolved dependencies:"
+            xcrun nm -u "$LIB" || true
+
+            echo ""
+            echo "Library size:"
+            ls -lh "$LIB"
+          } | tee reports/native-symbols.txt
+
+          if ! xcrun nm -g "$LIB" | \
+            grep -q '_rom_extract_build_pak'; then
+            echo "::error::Converter function missing"
+            exit 1
+          fi
+
+      - name: Upload native library
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-arm64-rom-converter
+          path: output/libEarthBoundRomConverter.a
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload converter reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-native-converter-reports
+          path: reports/
+          if-no-files-found: warn
+          retention-days: 30
